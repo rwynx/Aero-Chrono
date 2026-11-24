@@ -1,0 +1,69 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Version tag'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build standalone executable
+        run: |
+          pyinstaller AeroChrono.spec --noconfirm
+
+      - name: Generate SHA256 checksum
+        shell: powershell
+        run: |
+          $hash = (Get-FileHash -Path "dist/AeroChrono.exe" -Algorithm SHA256).Hash
+          "$hash  AeroChrono.exe" | Out-File -FilePath "dist/AeroChrono.exe.sha256" -Encoding utf8
+
+      - name: Determine release tag
+        id: get_tag
+        shell: powershell
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            echo "RELEASE_TAG=${{ github.event.inputs.tag_name }}" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_tag.outputs.RELEASE_TAG }}
+          name: Aero Chrono ${{ steps.get_tag.outputs.RELEASE_TAG }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            dist/AeroChrono.exe
+            dist/AeroChrono.exe.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

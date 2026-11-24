@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <defs>
+    <linearGradient id="moonGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d6edff"/>
+      <stop offset="50%" stop-color="#7db7e8"/>
+      <stop offset="100%" stop-color="#3a75a8"/>
+    </linearGradient>
+  </defs>
+  <!-- Crescent moon -->
+  <path d="M12.5 10.8 A5.8 5.8 0 1 1 8.2 2.2 A4.8 4.8 0 0 0 12.5 10.8 Z" fill="url(#moonGrad)" stroke="#235480" stroke-width="0.8"/>
+  <!-- Sparkles -->
+  <circle cx="12.5" cy="3.5" r="0.9" fill="#9de0ff"/>
+  <circle cx="14" cy="6.2" r="0.7" fill="#cbeeff"/>
+</svg>

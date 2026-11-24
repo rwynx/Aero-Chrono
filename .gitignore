@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# nope
+build/
+dist/
+*.spec.bak
+*.exe
+data/chrono.db*
+data/config.json
+data/icons/
+obsolete/
+.env
+.venv
+env/
+venv/
+ENV/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

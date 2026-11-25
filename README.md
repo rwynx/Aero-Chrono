@@ -23,6 +23,7 @@ Also it's safe, uses very low level APIs like `OpenProcess PROCESS_QUERY_LIMITED
 - **Classic Windows Feel**: Windows 7 Aero Light & Vista Obsidian Dark Glass themes. Basically light mode/dark mode.
 - **Private**: Fully offline, storing data locally in a SQLite database with JSON/CSV export capabilities. Do whatever you want with it! *Maybe I should add Drive connection or something...*
 - **Always Working**: You launch it, set it to "Auto start", it always runs in the background and never uses more than %0.1~ RAM (50~ MB), close it and it stays in your system tray.
+- **Pause Feature**: You want to pause tracking for a while? You can do it in-app `PAUSE` or right click on the icon in system tray and choose an option.
 
 > [!TIP]
 > DB file lives in `%APPDATA%`, but you can turn it into a portable version by adding a `portable.txt` file in the same folder as the `.exe` file. It will include the `data` folder right there after you restart the app. But it will, of course, start counting from zero, it won't move the initially created db. If you want a full migration with your existing DB when you change PCs or something, just back it up first.

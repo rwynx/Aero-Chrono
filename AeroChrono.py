@@ -72,7 +72,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Aero Chrono"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 POLL_INTERVAL_MS = 3000        # 3 sec polling foreground window
 FLUSH_INTERVAL_SEC = 15        # 15 sec sqLite sync
 
@@ -357,6 +357,18 @@ TRANSLATIONS = {
         "nav_filters": "Include / Exclude",
         "nav_settings": "Settings",
         "nav_about": "About",
+        "nav_pause": "Pause",
+        "nav_paused": "Paused",
+        "pause_5m": "Pause for 5 minutes",
+        "pause_15m": "Pause for 15 minutes",
+        "pause_1h": "Pause for 1 hour",
+        "pause_indef": "Pause until I resume",
+        "pause_resume": "Resume Tracking",
+        "tray_pause_menu": "Pause Tracking",
+        "status_paused_manual": "Tracking paused (Manual)",
+        "status_paused_timer": "Tracking paused (resumes in {rem})",
+        "tray_paused_manual": "{name} — Tracking paused (Manual)",
+        "tray_paused_timer": "{name} — Tracking paused ({rem} left)",
         "nav_export": "Export",
         "nav_reset": "Reset All",
         "about_title": "About Aero Chrono",
@@ -479,6 +491,18 @@ TRANSLATIONS = {
         "nav_filters": "Include / Exclude",
         "nav_settings": "Ayarlar",
         "nav_about": "Hakkında",
+        "nav_pause": "Duraklat",
+        "nav_paused": "Duraklatıldı",
+        "pause_5m": "5 dakika duraklat",
+        "pause_15m": "15 dakika duraklat",
+        "pause_1h": "1 saat duraklat",
+        "pause_indef": "Ben devam ettirene kadar duraklat",
+        "pause_resume": "Takibi Devam Ettir",
+        "tray_pause_menu": "Takibi Duraklat",
+        "status_paused_manual": "İzleme duraklatıldı (Manuel)",
+        "status_paused_timer": "İzleme duraklatıldı ({rem} sonra devam edecek)",
+        "tray_paused_manual": "{name} — İzleme duraklatıldı (Manuel)",
+        "tray_paused_timer": "{name} — İzleme duraklatıldı ({rem} kaldı)",
         "nav_export": "Dışa Aktar",
         "nav_reset": "Süreleri Sıfırla",
         "about_title": "Aero Chrono Hakkında",
@@ -850,6 +874,27 @@ def read_pe_version_strings(exe_path: str) -> Tuple[Optional[str], Optional[str]
     return query_field("ProductName"), query_field("FileDescription")
 
 
+def read_mui_cache_name(exe_path: str) -> Optional[str]:
+    if not exe_path:
+        return None
+    reg_path = r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"
+    norm_path = os.path.normpath(exe_path)
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_READ) as key:
+            for suffix in (".FriendlyAppName", ".ApplicationCompany"):
+                if suffix == ".ApplicationCompany":
+                    continue
+                try:
+                    val, _ = winreg.QueryValueEx(key, norm_path + suffix)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+                except FileNotFoundError:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
 # strip common suffixes (shipping, win64, etc)
 class NameResolver:
     SUFFIX_PATTERN = re.compile(
@@ -873,7 +918,23 @@ class NameResolver:
         return cleaned
 
     @classmethod
-    def resolve(cls, exe_name: str, exe_path: Optional[str] = None) -> str:
+    def _sanitize_window_title(cls, title: Optional[str]) -> Optional[str]:
+        if not title:
+            return None
+        t = re.sub(r"[®™©]", "", title).strip()
+        t = re.sub(r"\s{2,}", " ", t)
+        if not t or len(t) < 2 or len(t) > 64:
+            return None
+        # Skip titles that look like document/browser titles or file paths
+        if any(sep in t for sep in (" - ", " | ", " — ", " – ", "\\", "/", "http:", "https:")):
+            return None
+        if t.lower() in GENERIC_PRODUCT_NAMES or t.lower().endswith(".exe"):
+            return None
+        return t
+
+    @classmethod
+    def resolve(cls, exe_name: str, exe_path: Optional[str] = None, window_title: Optional[str] = None) -> str:
+        # 1. PE version metadata (ProductName / FileDescription)
         if exe_path:
             product, desc = read_pe_version_strings(exe_path)
             for candidate in (product, desc):
@@ -885,11 +946,23 @@ class NameResolver:
                     if valid and valid.lower() not in GENERIC_PRODUCT_NAMES:
                         return valid
 
+            # 2. Windows Shell MuiCache (pure HKCU registry read)
+            mui = cls._sanitize_meta(read_mui_cache_name(exe_path))
+            if mui:
+                return mui
+
+        # 3. Clean window title fallback (e.g. cs2.exe -> Counter-Strike 2)
+        wt = cls._sanitize_window_title(window_title)
+        if wt:
+            return wt
+
+        # 4. Stem cleanup & CamelCase splitting (e.g. ZenlessZoneZero.exe -> Zenless Zone Zero)
         stem = exe_name[:-4] if exe_name.lower().endswith(".exe") else exe_name
         cleaned = cls.SUFFIX_PATTERN.sub("", stem)
         cleaned = cls.TRAILING_TAG.sub("", cleaned).strip(" -_")
 
-        if cleaned and cleaned != stem and len(cleaned) >= 2:
+        has_camel = bool(re.search(r"[a-z][A-Z]", cleaned))
+        if cleaned and (cleaned != stem or has_camel or "_" in cleaned or "-" in cleaned) and len(cleaned) >= 2:
             if not cleaned.isupper():
                 cleaned = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", cleaned)
             cleaned = cleaned.replace("_", " ").replace("-", " ")
@@ -1109,13 +1182,15 @@ class Database:
     def upsert_app(self, app_key: str, exe_name: str, exe_path: Optional[str], display_name: str):
         now_iso = datetime.now().isoformat(timespec="seconds")
         cur = self.conn.cursor()
-        cur.execute("SELECT app_key, exe_path FROM apps WHERE app_key = ?", (app_key,))
+        cur.execute("SELECT app_key, exe_path, display_name FROM apps WHERE app_key = ?", (app_key,))
         row = cur.fetchone()
         if row:
             new_path = exe_path or row["exe_path"]
+            old_disp = row["display_name"] or ""
+            new_disp = display_name if (old_disp.lower().endswith(".exe") and not display_name.lower().endswith(".exe")) else old_disp
             cur.execute(
-                "UPDATE apps SET last_seen = ?, exe_path = ? WHERE app_key = ?",
-                (now_iso, new_path, app_key),
+                "UPDATE apps SET last_seen = ?, exe_path = ?, display_name = ? WHERE app_key = ?",
+                (now_iso, new_path, new_disp, app_key),
             )
         else:
             cur.execute(
@@ -1271,9 +1346,31 @@ class TrackerEngine:
         self._pid_meta_cache: Dict[int, Tuple[str, str, Optional[str]]] = {}
         self._resolved_names: Dict[str, str] = {}
 
+        self.paused: bool = False
+        self.pause_until: Optional[float] = None
+
         self._hook_handle = None
         self._win_event_cb = None
         self._on_instant_change: Optional[Callable[[], None]] = None
+
+    def pause(self, minutes: Optional[int] = None):
+        now_ts = time.time()
+        for app_key in list(self.active_sessions.keys()):
+            sess = self.active_sessions.pop(app_key)
+            dur = max(0, int(now_ts - sess.start_ts))
+            self.db.update_session(sess.session_id, now_ts, dur, is_active=0)
+        self.observed_running_apps.clear()
+        self.paused = True
+        self.pause_until = (now_ts + minutes * 60) if minutes is not None else None
+
+    def resume(self):
+        self.paused = False
+        self.pause_until = None
+
+    def get_pause_remaining_seconds(self) -> Optional[int]:
+        if not self.paused or self.pause_until is None:
+            return None
+        return max(0, int(self.pause_until - time.time()))
 
     def install_foreground_hook(self, on_change_callback: Optional[Callable[[], None]] = None):
         self._on_instant_change = on_change_callback
@@ -1281,7 +1378,9 @@ class TrackerEngine:
 
         def _cb(_hook, _event, hwnd, _id_obj, _id_child, _thread, _time):
             try:
-                ok, pid, _title = is_valid_user_window(hwnd, own_pid)
+                if self.paused:
+                    return
+                ok, pid, title = is_valid_user_window(hwnd, own_pid)
                 if not ok:
                     return
                 info = self._get_proc_info(pid)
@@ -1291,7 +1390,7 @@ class TrackerEngine:
                 focus_list = {x.lower() for x in self.config.data.get("focus_only_list", [])}
                 is_global_focus = (self.config.data.get("tracking_mode", "all") == "focused")
                 has_focus_rules = bool(focus_list) or is_global_focus
-                if self._register_pid_if_new(pid) or has_focus_rules:
+                if self._register_pid_if_new(pid, title) or has_focus_rules:
                     self.poll()
                     if self._on_instant_change:
                         self._on_instant_change()
@@ -1354,15 +1453,27 @@ class TrackerEngine:
         self._pid_meta_cache[pid] = info
         return info
 
-    def _start_tracking_app(self, app_key: str, pid: int, exe_name: str, exe_path: Optional[str], now_ts: float, today_str: str):
-        if app_key not in self._resolved_names:
-            self._resolved_names[app_key] = NameResolver.resolve(exe_name, exe_path)
+    def _start_tracking_app(
+        self,
+        app_key: str,
+        pid: int,
+        exe_name: str,
+        exe_path: Optional[str],
+        now_ts: float,
+        today_str: str,
+        window_title: Optional[str] = None,
+    ):
+        cached = self._resolved_names.get(app_key)
+        if not cached or (cached.lower().endswith(".exe") and window_title):
+            self._resolved_names[app_key] = NameResolver.resolve(exe_name, exe_path, window_title)
         display_name = self._resolved_names[app_key]
         self.db.upsert_app(app_key, exe_name, exe_path, display_name)
         sid = self.db.start_session(app_key, pid, now_ts, today_str)
         self.active_sessions[app_key] = ActiveSession(sid, app_key, pid, now_ts, today_str)
 
-    def _register_pid_if_new(self, pid: int) -> bool:
+    def _register_pid_if_new(self, pid: int, window_title: Optional[str] = None) -> bool:
+        if self.paused:
+            return False
         info = self._get_proc_info(pid)
         if not info:
             return False
@@ -1374,11 +1485,17 @@ class TrackerEngine:
 
         now_ts = time.time()
         today_str = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d")
-        self._start_tracking_app(app_key, pid, exe_name, exe_path, now_ts, today_str)
+        self._start_tracking_app(app_key, pid, exe_name, exe_path, now_ts, today_str, window_title)
         return True
 
     def poll(self) -> bool:
         now_ts = time.time()
+        if self.paused:
+            if self.pause_until is not None and now_ts >= self.pause_until:
+                self.resume()
+            else:
+                return False
+
         today_str = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d")
 
         own_pid = os.getpid()
@@ -1451,7 +1568,9 @@ class TrackerEngine:
 
         for app_key, (pid, exe_name, exe_path) in trackable_apps.items():
             if app_key not in self.active_sessions:
-                self._start_tracking_app(app_key, pid, exe_name, exe_path, now_ts, today_str)
+                self._start_tracking_app(
+                    app_key, pid, exe_name, exe_path, now_ts, today_str, visible_pids.get(pid)
+                )
                 changed = True
             else:
                 sess = self.active_sessions[app_key]
@@ -2605,7 +2724,14 @@ class AeroOrb(QWidget):
     def __init__(self, active: bool = True, size: int = 12, parent=None):
         super().__init__(parent)
         self.active = active
+        self.paused = False
         self.setFixedSize(size, size)
+
+    def set_state(self, active: bool = True, paused: bool = False):
+        if self.active != active or self.paused != paused:
+            self.active = active
+            self.paused = paused
+            self.update()
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -2613,7 +2739,12 @@ class AeroOrb(QWidget):
         r = QRectF(1.0, 1.0, self.width() - 2.0, self.height() - 2.0)
 
         grad = QLinearGradient(r.topLeft(), r.bottomLeft())
-        if self.active:
+        if self.paused:
+            grad.setColorAt(0.0, QColor("#ffe6a3"))
+            grad.setColorAt(0.45, QColor("#f0a51a"))
+            grad.setColorAt(1.0, QColor("#b87008"))
+            border = QColor("#8f5504")
+        elif self.active:
             grad.setColorAt(0.0, QColor("#b7f7c2"))
             grad.setColorAt(0.45, QColor("#39c458"))
             grad.setColorAt(1.0, QColor("#15852f"))
@@ -3005,7 +3136,7 @@ class AboutDialog(QDialog):
         link_a_color = "#6bc2ff" if is_dark else "#0e65c0"
         dev_text_color = "#c2d6ea" if is_dark else "#26425e"
         dev_lbl = QLabel(
-            f"{t.get('about_dev', 'Developer:')} <b>rwynx</b>  •  "
+            f"{t.get('about_dev', 'Developer:')} <b>Rwyn</b>  •  "
             f"<a href='https://github.com/rwynx' style='color:{link_a_color}; text-decoration:none; font-weight:600;'>"
             "github.com/rwynx</a>"
         )
@@ -3225,6 +3356,12 @@ class AeroChronoWindow(QWidget):
         self.btn_theme_toggle.setFixedSize(38, 28)
         self.btn_theme_toggle.clicked.connect(self._toggle_theme)
         cmd_layout.addWidget(self.btn_theme_toggle)
+
+        self.btn_pause = QPushButton(self.t("nav_pause"))
+        self.btn_pause.setProperty("class", "aeroNavBtn")
+        self.btn_pause.setCheckable(True)
+        self.btn_pause.clicked.connect(self._show_pause_menu)
+        cmd_layout.addWidget(self.btn_pause)
 
         self.btn_about = QPushButton(self.t("nav_about"))
         self.btn_about.setProperty("class", "aeroNavBtn")
@@ -3820,6 +3957,15 @@ class AeroChronoWindow(QWidget):
         self.btn_nav_filters.setText(self.t("nav_filters"))
         self.btn_nav_settings.setText(self.t("nav_settings"))
         self.btn_about.setText(self.t("nav_about"))
+        if hasattr(self, "btn_pause"):
+            self.btn_pause.setText(self.t("nav_paused") if self.engine.paused else self.t("nav_pause"))
+        if hasattr(self, "tray_pause_menu"):
+            self.tray_pause_menu.setTitle(self.t("tray_pause_menu"))
+            self.act_tray_pause_5m.setText(self.t("pause_5m"))
+            self.act_tray_pause_15m.setText(self.t("pause_15m"))
+            self.act_tray_pause_1h.setText(self.t("pause_1h"))
+            self.act_tray_pause_indef.setText(self.t("pause_indef"))
+            self.act_tray_resume.setText(self.t("pause_resume"))
         self.btn_export.setText(self.t("nav_export"))
         self.btn_reset.setText(self.t("nav_reset"))
 
@@ -3957,6 +4103,24 @@ class AeroChronoWindow(QWidget):
 
         self.tray_menu.addAction(self.act_open)
         self.tray_menu.addSeparator()
+
+        self.act_tray_resume = QAction(self.t("pause_resume"), self)
+        self.act_tray_resume.triggered.connect(self._resume_tracking)
+        self.act_tray_resume.setVisible(False)
+        self.tray_menu.addAction(self.act_tray_resume)
+
+        self.tray_pause_menu = self.tray_menu.addMenu(self.t("tray_pause_menu"))
+        self.act_tray_pause_5m = self.tray_pause_menu.addAction(self.t("pause_5m"))
+        self.act_tray_pause_5m.triggered.connect(lambda: self._pause_tracking(5))
+        self.act_tray_pause_15m = self.tray_pause_menu.addAction(self.t("pause_15m"))
+        self.act_tray_pause_15m.triggered.connect(lambda: self._pause_tracking(15))
+        self.act_tray_pause_1h = self.tray_pause_menu.addAction(self.t("pause_1h"))
+        self.act_tray_pause_1h.triggered.connect(lambda: self._pause_tracking(60))
+        self.tray_pause_menu.addSeparator()
+        self.act_tray_pause_indef = self.tray_pause_menu.addAction(self.t("pause_indef"))
+        self.act_tray_pause_indef.triggered.connect(lambda: self._pause_tracking(None))
+
+        self.tray_menu.addSeparator()
         self.tray_menu.addAction(self.act_quit)
 
         self.tray.setContextMenu(self.tray_menu)
@@ -4086,7 +4250,10 @@ class AeroChronoWindow(QWidget):
             self.tray.setToolTip(self.t("tray_active", name=APP_NAME, count=active_cnt))
 
     def _on_poll_tick(self):
+        was_paused = self.engine.paused
         changed = self.engine.poll()
+        if was_paused != self.engine.paused or self.engine.paused:
+            self._update_pause_ui()
         if self.isVisible() and self.pages.currentIndex() == 0:
             if changed or self.engine.active_sessions:
                 self.refresh_overview()
@@ -4176,8 +4343,12 @@ class AeroChronoWindow(QWidget):
 
         active_cnt = len(self.engine.active_sessions)
         total_cnt = len(apps)
-        self.lbl_status_left.setText(self.t("status_summary", total=total_cnt, active=active_cnt))
-        self.tray.setToolTip(self.t("tray_active", name=APP_NAME, count=active_cnt))
+        if self.engine.paused:
+            self._update_pause_ui()
+        else:
+            self.status_orb.set_state(active=True, paused=False)
+            self.lbl_status_left.setText(self.t("status_summary", total=total_cnt, active=active_cnt))
+            self.tray.setToolTip(self.t("tray_active", name=APP_NAME, count=active_cnt))
 
         if prev_key and any(a["app_key"] == prev_key for a in apps):
             self._update_inspector_header(prev_key)
@@ -4660,6 +4831,67 @@ class AeroChronoWindow(QWidget):
         dlg = AboutDialog(self, lang=self.lang, theme=self.current_theme)
         dlg.exec()
 
+    def _show_pause_menu(self):
+        # Keep checked state synced with actual paused state
+        self.btn_pause.setChecked(self.engine.paused)
+        menu = QMenu(self)
+        if self.engine.paused:
+            act_resume = menu.addAction(self.t("pause_resume"))
+            menu.addSeparator()
+        else:
+            act_resume = None
+
+        act_5m = menu.addAction(self.t("pause_5m"))
+        act_15m = menu.addAction(self.t("pause_15m"))
+        act_1h = menu.addAction(self.t("pause_1h"))
+        menu.addSeparator()
+        act_indef = menu.addAction(self.t("pause_indef"))
+
+        chosen = menu.exec(self.btn_pause.mapToGlobal(QPoint(0, self.btn_pause.height())))
+        if chosen is None:
+            return
+        if act_resume and chosen == act_resume:
+            self._resume_tracking()
+        elif chosen == act_5m:
+            self._pause_tracking(5)
+        elif chosen == act_15m:
+            self._pause_tracking(15)
+        elif chosen == act_1h:
+            self._pause_tracking(60)
+        elif chosen == act_indef:
+            self._pause_tracking(None)
+
+    def _pause_tracking(self, minutes: Optional[int]):
+        self.engine.pause(minutes)
+        self._update_pause_ui()
+        self.refresh_overview()
+
+    def _resume_tracking(self):
+        self.engine.resume()
+        self.engine.poll()
+        self._update_pause_ui()
+        self.refresh_overview()
+
+    def _update_pause_ui(self):
+        is_paused = self.engine.paused
+        if hasattr(self, "btn_pause"):
+            self.btn_pause.setChecked(is_paused)
+            self.btn_pause.setText(self.t("nav_paused") if is_paused else self.t("nav_pause"))
+        if hasattr(self, "act_tray_resume"):
+            self.act_tray_resume.setVisible(is_paused)
+        if is_paused:
+            self.status_orb.set_state(active=False, paused=True)
+            rem = self.engine.get_pause_remaining_seconds()
+            if rem is not None:
+                rem_str = format_duration(max(1, rem), include_seconds=(rem < 60), lang=self.lang)
+                self.lbl_status_left.setText(self.t("status_paused_timer", rem=rem_str))
+                self.tray.setToolTip(self.t("tray_paused_timer", name=APP_NAME, rem=rem_str))
+            else:
+                self.lbl_status_left.setText(self.t("status_paused_manual"))
+                self.tray.setToolTip(self.t("tray_paused_manual", name=APP_NAME))
+        else:
+            self.status_orb.set_state(active=True, paused=False)
+
     def _show_export_menu(self):
         menu = QMenu(self)
         act_json = menu.addAction(self.t("export_menu_json"))
@@ -4745,7 +4977,7 @@ class AeroChronoWindow(QWidget):
 
 def main():
     try:
-        shell32.SetCurrentProcessExplicitAppUserModelID("rwynx.aerochrono.timetracker.v100")
+        shell32.SetCurrentProcessExplicitAppUserModelID("rwynx.aerochrono.timetracker.v110")
     except Exception:
         pass
 
